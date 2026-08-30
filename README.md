@@ -7,9 +7,9 @@ The merged PDF contains:
 - a divider page before every submission;
 - a visible submission-ID label on every source page;
 - PDF bookmarks for quick navigation; and
-- a JSON manifest mapping each submission ID to its merged page range.
+- the submitter name from `submission_metadata.yml` on each divider.
 
-Submitter names are excluded by default. The numeric Gradescope submission ID remains the link back to `submission_metadata.yml`.
+The numeric Gradescope submission ID remains the stable link back to the original export.
 
 ## Setup
 
@@ -29,10 +29,9 @@ Run the script without a folder argument:
 python merge_gradescope_pdfs.py
 ```
 
-When `Folder path:` appears, paste the path to the unzipped Gradescope folder and press Enter. Paths copied with surrounding quotes are accepted. The results are saved in the same directory as `merge_gradescope_pdfs.py`:
+When the folder prompt appears, paste the path to the unzipped Gradescope folder and press Enter. Paths copied with surrounding quotes are accepted. After the PDF is created, the prompt returns so you can process another folder. Submit a blank line when you are finished.
 
-- `gradescope_submissions_merged.pdf`
-- `gradescope_submissions_merged.manifest.json`
+PDFs are saved in the `results` folder beside `merge_gradescope_pdfs.py`. Each filename is based on the source folder name. Existing results are never overwritten; `_2`, `_3`, and so on are added when necessary.
 
 ## Use with command-line arguments
 
@@ -42,16 +41,9 @@ Point the script at the unzipped Gradescope folder shown in the screenshot:
 python merge_gradescope_pdfs.py "C:\path\to\unzipped-submissions" -o "merged-submissions.pdf"
 ```
 
-It automatically reads `submission_metadata.yml` and every PDF directly inside the folder. PDFs are ordered numerically by submission ID. The command creates:
+It automatically reads `submission_metadata.yml` and every PDF directly inside the folder. PDFs are ordered numerically by submission ID. Unless `-o` is supplied, the command also writes a uniquely named PDF into `results`.
 
-- `merged-submissions.pdf`
-- `merged-submissions.manifest.json`
-
-If names are genuinely needed in the AI workflow, add `--include-names`. Be sure the chosen AI service is approved for student data first.
-
-```powershell
-python merge_gradescope_pdfs.py "C:\path\to\unzipped-submissions" -o "merged-submissions.pdf" --include-names
-```
+Submitter names are included automatically. Be sure the chosen AI service is approved for student data.
 
 Use `--no-page-labels` if the small label at the top of each source page is undesirable. Divider pages and bookmarks are still retained.
 

@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 tmp/
 output/
+results/

@@ -1,4 +1,4 @@
-import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -48,11 +48,10 @@ class MergeTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(len(PdfReader(output).pages), 5)
-            manifest = json.loads(output.with_suffix(".manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual([entry["submission_id"] for entry in manifest], ["3", "20"])
-            self.assertEqual(manifest[0]["content_pages"], {"start": 2, "end": 2})
-            self.assertEqual(manifest[1]["content_pages"], {"start": 4, "end": 5})
-            self.assertNotIn("submitters", manifest[0])
+            merged = PdfReader(output)
+            self.assertIn("Student Three", merged.pages[0].extract_text())
+            self.assertIn("Student Twenty", merged.pages[2].extract_text())
+            self.assertFalse(output.with_suffix(".manifest.json").exists())
 
             # A second run must not ingest the previous output as a submission.
             repeated = subprocess.run(
@@ -64,24 +63,32 @@ class MergeTests(unittest.TestCase):
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertEqual(len(PdfReader(output).pages), 5)
 
-    def test_prompts_for_quoted_source_path(self) -> None:
+    def test_interactive_mode_repeats_and_uses_results_folder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
-            make_pdf(folder / "12345.pdf", 1)
-            output = folder / "interactive-result.pdf"
+            copied_script = folder / SCRIPT.name
+            shutil.copy2(SCRIPT, copied_script)
+            first_source = folder / "grade set one"
+            second_source = folder / "grade set two"
+            first_source.mkdir()
+            second_source.mkdir()
+            make_pdf(first_source / "12345.pdf", 1)
+            make_pdf(second_source / "67890.pdf", 1)
 
             completed = subprocess.run(
-                [sys.executable, str(SCRIPT), "-o", str(output)],
-                input=f'"{folder}"\n',
+                [sys.executable, str(copied_script)],
+                input=f'"{first_source}"\n{second_source}\n\n',
                 capture_output=True,
                 text=True,
                 check=False,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertIn("Folder path:", completed.stdout)
-            self.assertTrue(output.is_file())
-            self.assertTrue(output.with_suffix(".manifest.json").is_file())
+            self.assertEqual(completed.stdout.count("Merged 1 submissions"), 2)
+            results = folder / "results"
+            self.assertTrue((results / "grade_set_one_merged.pdf").is_file())
+            self.assertTrue((results / "grade_set_two_merged.pdf").is_file())
+            self.assertEqual(list(results.glob("*.json")), [])
 
 
 if __name__ == "__main__":

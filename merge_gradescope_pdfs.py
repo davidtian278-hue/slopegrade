@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +38,24 @@ def clean_pasted_path(value: str) -> Path:
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
         cleaned = cleaned[1:-1].strip()
     return Path(cleaned).expanduser()
+
+
+def next_output_path(script_dir: Path, source_dir: Path) -> Path:
+    """Return a non-conflicting PDF path inside the script's results folder."""
+    safe_name = "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in source_dir.name
+    ).strip("._")
+    safe_name = safe_name or "gradescope_submissions"
+    results_dir = script_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate = results_dir / f"{safe_name}_merged.pdf"
+    sequence = 2
+    while candidate.exists():
+        candidate = results_dir / f"{safe_name}_merged_{sequence}.pdf"
+        sequence += 1
+    return candidate
 
 
 def load_metadata(path: Path) -> dict[str, Any]:
@@ -113,8 +130,8 @@ def pdf_page(width: float, height: float, draw: Any) -> Any:
     return PdfReader(buffer).pages[0]
 
 
-def make_separator(submission: Submission, position: int, total: int, include_names: bool) -> Any:
-    names = submitter_names(submission.metadata) if include_names else []
+def make_separator(submission: Submission, position: int, total: int) -> Any:
+    names = submitter_names(submission.metadata)
 
     def draw(pdf: canvas.Canvas, width: float, height: float) -> None:
         navy = HexColor("#17324D")
@@ -134,14 +151,14 @@ def make_separator(submission: Submission, position: int, total: int, include_na
         pdf.drawString(48, height - 199, f"Submission {position} of {total}")
         pdf.drawString(48, height - 219, f"Source file: {submission.pdf_path.name}")
 
-        if names:
-            pdf.setFont("Helvetica-Bold", 11)
-            pdf.drawString(48, height - 259, "Submitter(s)")
-            pdf.setFont("Helvetica", 11)
-            y = height - 280
-            for name in names:
-                pdf.drawString(62, y, name[:90])
-                y -= 18
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(48, height - 259, "Submitter(s)")
+        pdf.setFont("Helvetica", 11)
+        y = height - 280
+        displayed_names = names or ["Name unavailable in submission_metadata.yml"]
+        for name in displayed_names:
+            pdf.drawString(62, y, name[:90])
+            y -= 18
 
         pdf.setFillColor(navy)
         pdf.setFont("Helvetica-Bold", 12)
@@ -171,7 +188,6 @@ def page_dimensions(page: Any) -> tuple[float, float]:
 def merge_submissions(
     submissions: Iterable[Submission],
     output_path: Path,
-    include_names: bool,
     label_pages: bool,
 ) -> list[dict[str, Any]]:
     items = list(submissions)
@@ -197,7 +213,7 @@ def merge_submissions(
             raise ValueError(f"Could not read {submission.pdf_path.name}: {exc}") from exc
 
         separator_page = len(writer.pages) + 1
-        writer.add_page(make_separator(submission, index, len(items), include_names))
+        writer.add_page(make_separator(submission, index, len(items)))
         writer.add_outline_item(f"Submission {submission.submission_id}", separator_page - 1)
 
         content_start = len(writer.pages) + 1
@@ -221,8 +237,6 @@ def merge_submissions(
             "content_pages": {"start": content_start, "end": content_end},
             "source_page_count": len(reader.pages),
         }
-        if include_names:
-            entry["submitters"] = submitter_names(submission.metadata)
         manifest.append(entry)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,14 +262,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         type=Path,
-        help="Output PDF (default: gradescope_submissions_merged.pdf beside this script)",
+        help="Output PDF (default: a unique name in the script's results folder)",
     )
     parser.add_argument("--metadata", type=Path, help="Metadata YAML path (auto-detected by default)")
-    parser.add_argument(
-        "--include-names",
-        action="store_true",
-        help="Include submitter names from YAML (off by default for privacy)",
-    )
     parser.add_argument(
         "--no-page-labels",
         action="store_true",
@@ -264,23 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    prompted_for_source = args.source is None
-    if prompted_for_source:
-        print("Paste the path to the unzipped Gradescope submissions folder.")
-        try:
-            pasted = input("Folder path: ")
-        except EOFError:
-            print("error: no folder path was provided", file=sys.stderr)
-            return 2
-        if not pasted.strip():
-            print("error: no folder path was provided", file=sys.stderr)
-            return 2
-        source_dir = clean_pasted_path(pasted).resolve()
-    else:
-        source_dir = args.source.resolve()
-
+def process_source(source_dir: Path, args: argparse.Namespace) -> int:
     if not source_dir.is_dir():
         print(f"error: source folder not found: {source_dir}", file=sys.stderr)
         return 2
@@ -290,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path = (
             args.output.resolve()
             if args.output is not None
-            else script_dir / "gradescope_submissions_merged.pdf"
+            else next_output_path(script_dir, source_dir)
         )
         metadata_path = find_metadata(source_dir, args.metadata)
         metadata = load_metadata(metadata_path) if metadata_path else {}
@@ -309,22 +302,39 @@ def main(argv: list[str] | None = None) -> int:
         manifest = merge_submissions(
             submissions,
             output_path,
-            include_names=args.include_names,
             label_pages=not args.no_page_labels,
         )
-        manifest_path = output_path.with_suffix(".manifest.json")
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     source_pages = sum(item["source_page_count"] for item in manifest)
     print(f"Merged {len(manifest)} submissions ({source_pages} source pages).")
-    print(f"PDF:      {output_path}")
-    print(f"Manifest: {manifest_path}")
-    if prompted_for_source and sys.stdin.isatty():
-        input("Press Enter to close...")
+    print(f"PDF: {output_path}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.source is not None:
+        return process_source(args.source.resolve(), args)
+
+    print("Paste the path to an unzipped Gradescope submissions folder.")
+    print("After each merge you can paste another path. Leave it blank to finish.")
+    final_status = 0
+    while True:
+        try:
+            pasted = input("Folder path (blank to finish): ")
+        except EOFError:
+            print()
+            return final_status
+        if not pasted.strip():
+            print("Finished.")
+            return final_status
+        status = process_source(clean_pasted_path(pasted).resolve(), args)
+        if status != 0:
+            final_status = status
+        print()
 
 
 if __name__ == "__main__":
