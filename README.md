@@ -1,6 +1,6 @@
 # Gradescope PDF merger
 
-Turn a Gradescope bulk export into one chatbot-friendly PDF without losing which pages belong to which submission.
+Turn a Gradescope bulk export into one easily readble PDF without losing which pages belong to which submission.
 
 The merged PDF contains:
 
