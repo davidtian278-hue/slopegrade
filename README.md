@@ -41,7 +41,7 @@ Point the script at the unzipped Gradescope folder shown in the screenshot:
 python merge_gradescope_pdfs.py "C:\path\to\unzipped-submissions" -o "merged-submissions.pdf"
 ```
 
-It automatically reads `submission_metadata.yml` and every PDF directly inside the folder. PDFs are ordered numerically by submission ID. Unless `-o` is supplied, the command also writes a uniquely named PDF into `results`.
+It automatically reads `submission_metadata.yml` and every PDF directly inside the folder. Metadata keys can be either `422145561.pdf` (Gradescope's usual export format) or `422145561`. PDFs are ordered from earliest to latest using Gradescope's submission timestamp (`created_at` or `submission_time`). Missing or unreadable timestamps are placed last and ordered numerically by submission ID. Unless `-o` is supplied, the command writes a uniquely named PDF into `results`.
 
 Submitter names are included automatically. Be sure the chosen AI service is approved for student data.
 

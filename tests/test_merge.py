@@ -31,8 +31,14 @@ class MergeTests(unittest.TestCase):
             (folder / "submission_metadata.yml").write_text(
                 yaml.safe_dump(
                     {
-                        20: {":submitters": [{":name": "Student Twenty"}]},
-                        3: {":submitters": [{":name": "Student Three"}]},
+                        "20.pdf": {
+                            ":created_at": "2026-08-30T08:00:00-04:00",
+                            ":submitters": [{":name": "Student Twenty"}],
+                        },
+                        "3.pdf": {
+                            ":submission_time": "2026-08-30 14:00:00+00:00",
+                            ":submitters": [{":name": "Student Three"}],
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -49,8 +55,9 @@ class MergeTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(len(PdfReader(output).pages), 5)
             merged = PdfReader(output)
-            self.assertIn("Student Three", merged.pages[0].extract_text())
-            self.assertIn("Student Twenty", merged.pages[2].extract_text())
+            # 08:00 EDT is 12:00 UTC, so submission 20 precedes submission 3.
+            self.assertIn("Student Twenty", merged.pages[0].extract_text())
+            self.assertIn("Student Three", merged.pages[3].extract_text())
             self.assertFalse(output.with_suffix(".manifest.json").exists())
 
             # A second run must not ingest the previous output as a submission.
@@ -62,6 +69,38 @@ class MergeTests(unittest.TestCase):
             )
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertEqual(len(PdfReader(output).pages), 5)
+
+    def test_missing_submission_times_sort_last(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            for submission_id in ("10", "20", "30"):
+                make_pdf(folder / f"{submission_id}.pdf", 1)
+            (folder / "submission_metadata.yml").write_text(
+                yaml.safe_dump(
+                    {
+                        "10.pdf": {":created_at": "not a timestamp"},
+                        "20.pdf": {":created_at": "2026-08-30T15:00:00Z"},
+                        "30.pdf": {":created_at": "2026-08-30T14:00:00Z"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = folder / "ordered.pdf"
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), str(folder), "-o", str(output)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            merged = PdfReader(output)
+            divider_ids = [merged.pages[index].extract_text() for index in (0, 2, 4)]
+            self.assertIn("30", divider_ids[0])
+            self.assertIn("20", divider_ids[1])
+            self.assertIn("10", divider_ids[2])
+            self.assertIn("placed after timestamped submissions", completed.stderr)
 
     def test_interactive_mode_repeats_and_uses_results_folder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

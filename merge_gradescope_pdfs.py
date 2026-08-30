@@ -7,6 +7,7 @@ import argparse
 import io
 import sys
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,6 +19,16 @@ from reportlab.pdfgen import canvas
 
 
 METADATA_NAMES = ("submission_metadata.yml", "submission_metadata.yaml")
+SUBMISSION_TIME_KEYS = (
+    ":created_at",
+    "created_at",
+    ":submission_time",
+    "submission_time",
+    ":submitted_at",
+    "submitted_at",
+    ":timestamp",
+    "timestamp",
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,73 @@ class Submission:
 def natural_id_key(value: str) -> tuple[int, int | str]:
     """Sort all-numeric IDs numerically, then other IDs alphabetically."""
     return (0, int(value)) if value.isdigit() else (1, value.casefold())
+
+
+def submission_time_value(metadata: Any) -> Any | None:
+    if not isinstance(metadata, dict):
+        return None
+    for key in SUBMISSION_TIME_KEYS:
+        if key in metadata and metadata[key] not in (None, ""):
+            return metadata[key]
+    return None
+
+
+def parse_submission_time(value: Any) -> float | None:
+    """Convert common Gradescope/YAML timestamp representations to Unix time."""
+    parsed: datetime
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        # Accommodate epoch milliseconds or microseconds if encountered.
+        while abs(timestamp) > 32_503_680_000:
+            timestamp /= 1000
+        return timestamp
+    elif isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            numeric = float(candidate)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            while abs(numeric) > 32_503_680_000:
+                numeric /= 1000
+            return numeric
+        if candidate.endswith(("Z", "z")):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            for date_format in (
+                "%Y-%m-%d %H:%M:%S %z",
+                "%Y/%m/%d %H:%M:%S %z",
+                "%m/%d/%Y %I:%M:%S %p %z",
+                "%m/%d/%Y %I:%M %p %z",
+            ):
+                try:
+                    parsed = datetime.strptime(candidate, date_format)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def submission_sort_key(submission: Submission) -> tuple[Any, ...]:
+    timestamp = parse_submission_time(submission_time_value(submission.metadata))
+    if timestamp is None:
+        return (1, 0.0, natural_id_key(submission.submission_id))
+    return (0, timestamp, natural_id_key(submission.submission_id))
 
 
 def clean_pasted_path(value: str) -> Path:
@@ -81,6 +159,20 @@ def find_metadata(source_dir: Path, explicit_path: Path | None) -> Path | None:
     return None
 
 
+def metadata_for_pdf(metadata: dict[str, Any], pdf_path: Path) -> Any | None:
+    """Match Gradescope exports keyed by either `123.pdf` or `123`."""
+    for candidate in (pdf_path.name, pdf_path.stem):
+        if candidate in metadata:
+            return metadata[candidate]
+
+    # Be tolerant of an uppercase .PDF suffix or other casing differences.
+    casefolded = {key.casefold(): value for key, value in metadata.items()}
+    for candidate in (pdf_path.name, pdf_path.stem):
+        if candidate.casefold() in casefolded:
+            return casefolded[candidate.casefold()]
+    return None
+
+
 def discover_submissions(
     source_dir: Path,
     metadata: dict[str, Any],
@@ -96,10 +188,10 @@ def discover_submissions(
         raise ValueError(f"No PDF files found in {source_dir}")
 
     submissions = [
-        Submission(submission_id, pdf_path, metadata.get(submission_id))
+        Submission(submission_id, pdf_path, metadata_for_pdf(metadata, pdf_path))
         for submission_id, pdf_path in pdfs.items()
     ]
-    return sorted(submissions, key=lambda item: natural_id_key(item.submission_id))
+    return sorted(submissions, key=submission_sort_key)
 
 
 def submitter_names(metadata: Any) -> list[str]:
@@ -289,13 +381,27 @@ def process_source(source_dir: Path, args: argparse.Namespace) -> int:
         metadata = load_metadata(metadata_path) if metadata_path else {}
         submissions = discover_submissions(source_dir, metadata, excluded_paths=(output_path,))
 
-        missing_ids = [item.submission_id for item in submissions if item.submission_id not in metadata]
+        missing_ids = [item.submission_id for item in submissions if item.metadata is None]
+        missing_times = [
+            item.submission_id
+            for item in submissions
+            if parse_submission_time(submission_time_value(item.metadata)) is None
+        ]
         if metadata_path is None:
-            print("warning: no submission_metadata.yml found; using PDF filenames as IDs", file=sys.stderr)
+            print(
+                "warning: no submission_metadata.yml found; using numeric submission-ID order",
+                file=sys.stderr,
+            )
         elif missing_ids:
             print(
                 f"warning: {len(missing_ids)} PDF(s) had no matching YAML entry; "
                 "their filenames will still be used as IDs",
+                file=sys.stderr,
+            )
+        if metadata_path is not None and missing_times:
+            print(
+                f"warning: {len(missing_times)} submission(s) had no readable submission time; "
+                "they were placed after timestamped submissions",
                 file=sys.stderr,
             )
 
