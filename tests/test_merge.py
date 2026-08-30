@@ -102,6 +102,41 @@ class MergeTests(unittest.TestCase):
             self.assertIn("10", divider_ids[2])
             self.assertIn("placed after timestamped submissions", completed.stderr)
 
+    def test_reference_pdfs_are_naturally_sorted_before_submissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            copied_script = folder / SCRIPT.name
+            shutil.copy2(SCRIPT, copied_script)
+            submissions = folder / "submissions"
+            references = folder / "references"
+            submissions.mkdir()
+            references.mkdir()
+            make_pdf(submissions / "123.pdf", 1)
+            make_pdf(references / "Part 10 Solution.pdf", 1)
+            make_pdf(references / "Part 2 Assignment.pdf", 1)
+            output = folder / "with-references.pdf"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(copied_script),
+                    str(submissions),
+                    "-o",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            merged = PdfReader(output)
+            self.assertEqual(len(merged.pages), 6)
+            self.assertIn("Part 2 Assignment", merged.pages[0].extract_text())
+            self.assertIn("Part 10 Solution", merged.pages[2].extract_text())
+            self.assertIn("123", merged.pages[4].extract_text())
+            self.assertIn("Added 2 reference PDF(s)", completed.stdout)
+
     def test_interactive_mode_repeats_and_uses_results_folder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

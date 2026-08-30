@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -41,6 +42,14 @@ class Submission:
 def natural_id_key(value: str) -> tuple[int, int | str]:
     """Sort all-numeric IDs numerically, then other IDs alphabetically."""
     return (0, int(value)) if value.isdigit() else (1, value.casefold())
+
+
+def natural_filename_key(path: Path) -> tuple[Any, ...]:
+    """Sort names so `Part 2.pdf` appears before `Part 10.pdf`."""
+    return tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", path.name)
+    )
 
 
 def submission_time_value(metadata: Any) -> Any | None:
@@ -194,6 +203,17 @@ def discover_submissions(
     return sorted(submissions, key=submission_sort_key)
 
 
+def discover_reference_pdfs(reference_dir: Path) -> list[Path]:
+    if not reference_dir.is_dir():
+        return []
+    pdfs = [
+        path
+        for path in reference_dir.iterdir()
+        if path.is_file() and path.suffix.casefold() == ".pdf"
+    ]
+    return sorted(pdfs, key=natural_filename_key)
+
+
 def submitter_names(metadata: Any) -> list[str]:
     """Read Gradescope's :submitters field without assuming every export has it."""
     if not isinstance(metadata, dict):
@@ -262,6 +282,38 @@ def make_separator(submission: Submission, position: int, total: int) -> Any:
     return pdf_page(letter[0], letter[1], draw)
 
 
+def make_reference_separator(pdf_path: Path, position: int, total: int) -> Any:
+    def draw(pdf: canvas.Canvas, width: float, height: float) -> None:
+        navy = HexColor("#17324D")
+        teal = HexColor("#168B87")
+        muted = HexColor("#536273")
+        pdf.setFillColor(teal)
+        pdf.rect(0, height - 88, width, 88, stroke=0, fill=1)
+        pdf.setFillColor(white)
+        pdf.setFont("Helvetica-Bold", 15)
+        pdf.drawString(48, height - 54, "REFERENCE DOCUMENT")
+
+        pdf.setFillColor(navy)
+        pdf.setFont("Helvetica-Bold", 24)
+        title = pdf_path.stem
+        if len(title) > 43:
+            title = title[:40] + "..."
+        pdf.drawString(48, height - 170, title)
+        pdf.setFillColor(muted)
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(48, height - 201, f"Reference {position} of {total}")
+        pdf.drawString(48, height - 221, f"Source file: {pdf_path.name}")
+
+        pdf.setFillColor(teal)
+        pdf.setFont("Helvetica-Bold", 12)
+        pdf.drawString(48, 72, "BEGIN REFERENCE DOCUMENT")
+        pdf.setFillColor(muted)
+        pdf.setFont("Helvetica", 9)
+        pdf.drawString(48, 52, "This material applies to the submissions that follow.")
+
+    return pdf_page(letter[0], letter[1], draw)
+
+
 def make_page_label(width: float, height: float, text: str) -> Any:
     def draw(pdf: canvas.Canvas, _width: float, _height: float) -> None:
         pdf.setFillColorRGB(1, 1, 1, alpha=0.90)
@@ -281,18 +333,45 @@ def merge_submissions(
     submissions: Iterable[Submission],
     output_path: Path,
     label_pages: bool,
+    reference_pdfs: Iterable[Path] = (),
 ) -> list[dict[str, Any]]:
     items = list(submissions)
+    references = list(reference_pdfs)
     writer = PdfWriter()
     manifest: list[dict[str, Any]] = []
 
     writer.add_metadata(
         {
-            "/Title": "Gradescope submissions",
-            "/Subject": "Merged submissions with ID divider pages and bookmarks",
+            "/Title": "Gradescope submissions and reference materials",
+            "/Subject": "Reference documents followed by identified Gradescope submissions",
             "/Creator": "merge_gradescope_pdfs.py",
         }
     )
+
+    for index, reference_path in enumerate(references, start=1):
+        try:
+            reader = PdfReader(reference_path)
+            if reader.is_encrypted and not reader.decrypt(""):
+                raise ValueError("PDF is password protected")
+            if not reader.pages:
+                raise ValueError("PDF has no pages")
+        except Exception as exc:
+            raise ValueError(f"Could not read reference PDF {reference_path.name}: {exc}") from exc
+
+        separator_page = len(writer.pages) + 1
+        writer.add_page(make_reference_separator(reference_path, index, len(references)))
+        writer.add_outline_item(f"Reference: {reference_path.stem}", separator_page - 1)
+        for source_page_number, page in enumerate(reader.pages, start=1):
+            if label_pages:
+                if page.rotation:
+                    page.transfer_rotation_to_content()
+                width, height = page_dimensions(page)
+                label = (
+                    f"REFERENCE: {reference_path.name}  |  "
+                    f"source page {source_page_number} of {len(reader.pages)}"
+                )
+                page.merge_page(make_page_label(width, height, label), over=True)
+            writer.add_page(page)
 
     for index, submission in enumerate(items, start=1):
         try:
@@ -340,8 +419,8 @@ def merge_submissions(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Merge Gradescope PDFs into one document with divider pages, bookmarks, "
-            "visible submission IDs, and a JSON page-range manifest."
+            "Merge optional reference PDFs and Gradescope submissions into one document "
+            "with divider pages, bookmarks, and visible page labels."
         )
     )
     parser.add_argument(
@@ -380,6 +459,9 @@ def process_source(source_dir: Path, args: argparse.Namespace) -> int:
         metadata_path = find_metadata(source_dir, args.metadata)
         metadata = load_metadata(metadata_path) if metadata_path else {}
         submissions = discover_submissions(source_dir, metadata, excluded_paths=(output_path,))
+        references_dir = script_dir / "references"
+        references_dir.mkdir(parents=True, exist_ok=True)
+        reference_pdfs = discover_reference_pdfs(references_dir)
 
         missing_ids = [item.submission_id for item in submissions if item.metadata is None]
         missing_times = [
@@ -409,12 +491,15 @@ def process_source(source_dir: Path, args: argparse.Namespace) -> int:
             submissions,
             output_path,
             label_pages=not args.no_page_labels,
+            reference_pdfs=reference_pdfs,
         )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     source_pages = sum(item["source_page_count"] for item in manifest)
+    if reference_pdfs:
+        print(f"Added {len(reference_pdfs)} reference PDF(s) before the submissions.")
     print(f"Merged {len(manifest)} submissions ({source_pages} source pages).")
     print(f"PDF: {output_path}")
     return 0

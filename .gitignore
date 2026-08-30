@@ -4,3 +4,5 @@ __pycache__/
 tmp/
 output/
 results/
+references/*
+!references/.gitkeep
